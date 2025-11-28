@@ -17,7 +17,7 @@ return new class extends Migration
             $table->text('bio')->nullable();
             $table->string('phone',20)->nullable()->index();
             $table->string('avatar')->nullable();
-            $table->enum('gender', ['Male','Female','other'])->nullable();
+            $table->enum('gender', ['male','female','other'])->nullable();
             $table->date('dob')->nullable();
             $table->string('country',100)->nullable();
             $table->string('city',100)->nullable();

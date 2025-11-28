@@ -1,0 +1,1260 @@
+===================================================================================
+                 COMPLETE LARAVEL USER AUTHENTICATION & PROFILE SYSTEM
+                       Learning Guide & Project Implementation
+===================================================================================
+
+TABLE OF CONTENTS:
+1. Project Overview
+2. Architecture & Design Patterns
+3. Complete Code Walkthrough
+4. Concepts Explained
+5. Issues Found & Fixed
+6. How Everything Works Together
+7. API Endpoints Reference
+8. Testing Guide
+
+===================================================================================
+1. PROJECT OVERVIEW
+===================================================================================
+
+This is a full-stack Laravel 12 application implementing a real-world User Authentication 
+and Profile Management system with the following features:
+
+✓ User Registration with email verification
+✓ Login with email verification requirement
+✓ Email verification via signed URLs (no session required)
+✓ Password reset (forgot password functionality)
+✓ Profile management (CRUD operations with image upload)
+✓ Authorization with Policies
+✓ Request validation with Form Requests
+✓ Resource transformation with API Resources
+✓ API and Web (Blade) interfaces
+✓ Database transactions for data consistency
+
+===================================================================================
+2. ARCHITECTURE & DESIGN PATTERNS
+===================================================================================
+
+2.1 MVC PATTERN (Model-View-Controller)
+────────────────────────────────────────
+
+MODEL LAYER:
+- app/Models/User.php: Represents user entity, handles authentication & email verification
+- app/Models/Profile.php: Represents user profile with bio, avatar, location details
+- Relationships: User hasOne Profile (one user has one profile)
+
+CONTROLLER LAYER:
+- app/Http/Controllers/Auth/AuthController.php: Handles all authentication logic
+- app/Http/Controllers/Auth/EmailVerificationController.php: Handles email verification
+- app/Http/Controllers/ProfileController.php: Handles profile CRUD operations
+
+VIEW LAYER:
+- resources/views/layouts/app.blade.php: Master layout template
+- resources/views/auth/*: Authentication views (register, login, verify, reset password)
+- resources/views/profile/index.blade.php: Profile management view
+
+2.2 AUTHORIZATION WITH POLICIES
+────────────────────────────────
+
+Policies are classes that authorize actions on models. They encapsulate authorization logic.
+
+UserPolicy (app/Policies/UserPolicy.php):
+  - view(): Anyone can view any user (public profiles)
+  - update(): Only user can update their own data (user.id === model.id)
+  - delete(): Only user can delete their own account
+  - viewAny(): Anyone can view all users
+
+ProfilePolicy (app/Policies/ProfilePolicy.php):
+  - view(): Anyone can view any profile
+  - update(): Only profile owner can update
+  - delete(): Only profile owner can delete
+
+Usage in Controller:
+  $this->authorize('update', $user);  // Checks UserPolicy::update()
+  $this->authorize('delete', $profile); // Checks ProfilePolicy::delete()
+
+If authorization fails → throws AuthorizationException → 403 Forbidden response
+
+2.3 FORM REQUESTS (Validation)
+──────────────────────────────
+
+Form Requests centralize validation logic and authorization checks.
+
+RegisterRequest:
+  - Rules: name (required, string, max 255), email (required, unique), password (min 8, confirmed)
+  - authorize(): Returns true (anyone can register)
+
+LoginRequest:
+  - Rules: email (required), password (required)
+  - authorize(): Returns true (anyone can login)
+
+UpdateRequest:
+  - Rules: name, email (nullable), password (min 8, confirmed)
+  - authorize(): Uses UserPolicy to check if user can update target user
+  - Uses Rule::unique('users','email')->ignore($user->id) to allow same email
+
+ForgotPasswordRequest:
+  - Rules: email (required, exists in users table)
+
+ResetPasswordRequest:
+  - Rules: token, email, password (min 8, confirmed)
+
+Usage in Controller:
+  public function register(RegisterRequest $request) {
+      $request->validated(); // Returns validated data or throws validation error
+  }
+
+2.4 API RESOURCES (Response Transformation)
+─────────────────────────────────────────
+
+Resources transform models into JSON for API responses.
+
+UserResource (app/Http/Resources/UserResource.php):
+  Transforms User model to:
+  {
+    "id": 1,
+    "name": "John",
+    "email": "john@example.com",
+    "profile": { ... },
+    "created_at": "2025-01-01T00:00:00Z",
+    "updated_at": "2025-01-01T00:00:00Z"
+  }
+
+ProfileResource (app/Http/Resources/ProfileResource.php):
+  Transforms Profile model to:
+  {
+    "bio": "Developer",
+    "phone": "1234567890",
+    "avatar": "avatars/path",
+    "gender": "Male",
+    "dob": "1995-01-01",
+    "country": "USA",
+    "city": "New York"
+  }
+
+Usage:
+  return response()->json([
+      'user' => new UserResource($user)
+  ]);
+
+2.5 NOTIFICATIONS
+─────────────────
+
+Notifications send emails to users for specific events.
+
+VerifyEmailWithCustomUrl:
+  - Sends when user registers
+  - Contains verification link generated with signed URL
+  - Expires in 60 minutes
+
+PasswordResetNotification:
+  - Sends when user requests password reset
+  - Contains reset link valid for reset broker's expiration time
+  - Includes user-friendly message
+
+Usage:
+  $user->notify(new VerifyEmailWithCustomUrl($url));
+
+===================================================================================
+3. COMPLETE CODE WALKTHROUGH
+===================================================================================
+
+3.1 USER REGISTRATION FLOW
+──────────────────────────
+
+ENDPOINT: POST /api/register
+
+CODE (AuthController::register):
+  1. Validate request using RegisterRequest
+     - Checks: name (required, max 255), email (required, unique), password (min 8, confirmed)
+     - If invalid → 422 Validation Error response
+
+  2. Create user with hashed password
+     $user = User::create([
+         'name' => $request->name,
+         'email' => $request->email,
+         'password' => Hash::make($request->password), // Hash for security
+     ]);
+
+  3. Create empty profile for user
+     $user->profile()->create([]); // Establishes User → Profile relationship
+
+  4. Send verification email
+     $this->sendVerificationEmail($user);
+     - Generates signed URL: /email/verify/{id}/{hash}?expires=...&signature=...
+     - Hash = SHA1 of user's email
+     - URL is signed so it can't be tampered with
+     - URL expires after 60 minutes
+     - Sends email via VerifyEmailWithCustomUrl notification
+
+  5. Create API token for immediate access
+     $token = $user->createToken('auth_token')->plainTextToken;
+     - User gets token immediately but can't login until email verified
+     - Token stored in personal_access_tokens table
+     - Client can use token for API calls (e.g., to fetch profile)
+
+  6. Return response with token and message
+     Returns: 201 with token, message "User registered successfully"
+
+RESPONSE:
+{
+  "success": true,
+  "message": "User registered successfully, please verify your email.",
+  "requires_verification": true,
+  "token": "xxxx|yyyy",
+  "token_type": "Bearer",
+  "data": { ...user data... }
+}
+
+3.2 EMAIL VERIFICATION FLOW
+───────────────────────────
+
+ENDPOINT: GET /api/email/verify/{id}/{hash}?expires=...&signature=...
+
+PROBLEM THAT WAS FIXED:
+  Laravel's default EmailVerificationRequest assumes authenticated user.
+  When user clicks email link (no session), it failed: "getKey() on null"
+  
+SOLUTION IMPLEMENTED:
+  Used Request object instead of EmailVerificationRequest
+  Manually validate signed URL and verify user
+
+CODE (EmailVerificationController::verify):
+  1. Validate signed URL (prevents tampering, checks expiration)
+     if (!$request->hasValidSignature()) {
+         return error("Invalid or expired verification link", 400);
+     }
+     // This checks the ?signature= parameter using app's APP_KEY
+
+  2. Load user from database
+     $user = User::findOrFail($id);
+     // If user doesn't exist → 404
+
+  3. Check if already verified
+     if ($user->hasVerifiedEmail()) {
+         return error("Email is already verified", 400);
+     }
+
+  4. Validate hash matches user's email
+     if (!hash_equals(sha1($user->getEmailForVerification()), $hash)) {
+         return error("Invalid verification link", 400);
+     }
+     // hash_equals() prevents timing attacks
+
+  5. Mark email as verified
+     $user->markEmailAsVerified();
+     // Sets email_verified_at = NOW()
+
+  6. Fire Verified event (triggers listeners, useful for future features)
+     event(new Verified($user));
+
+  7. Return success
+     Returns: 200 with message "Email verified successfully"
+
+3.3 LOGIN FLOW
+──────────────
+
+ENDPOINT: POST /api/login
+
+CODE (AuthController::login):
+  1. Find user by email
+     $user = User::where('email', $request->email)->first();
+
+  2. Validate password (always check both user AND password for security)
+     if (!$user || !Hash::check($request->password, $user->password)) {
+         return error("Invalid credentials", 422);
+     }
+
+  3. CHECK EMAIL VERIFICATION (NEW REQUIREMENT)
+     if (!$user->hasVerifiedEmail()) {
+         return error("Please verify your email before logging in", 403);
+     }
+     // This blocks unverified users from accessing protected routes
+     // Improves security: ensures only legitimate users login
+
+  4. Delete old tokens (optional, clean up)
+     $user->tokens()->delete();
+     // Prevents token accumulation, old tokens no longer work
+
+  5. Create new API token
+     $token = $user->createToken('auth_token')->plainTextToken;
+     // Valid indefinitely (can add expiration if needed)
+
+  6. Return token and user data
+     Returns: 200 with token and user resource
+
+RESPONSE:
+{
+  "message": "Login successful",
+  "token": "xxxx|yyyy",
+  "user": { ...user data... }
+}
+
+3.4 PROFILE UPDATE FLOW
+──────────────────────
+
+ENDPOINT: PUT /api/profile
+
+CODE (ProfileController::update):
+  1. Authorize user (check policy)
+     $this->authorize('update', $profile);
+     // Ensures only profile owner can update
+
+  2. Validate input using UpdateProfileRequest
+     - bio, phone, avatar, gender, dob, country, city (all optional)
+
+  3. Begin database transaction (ensures consistency)
+     DB::beginTransaction();
+
+  4. Handle avatar upload if provided
+     if ($request->hasFile('avatar')) {
+         // Delete old avatar if exists
+         if ($profile->avatar && Storage::disk('public')->exists($profile->avatar)) {
+             Storage::disk('public')->delete($profile->avatar);
+         }
+         // Store new avatar
+         $path = $request->file('avatar')->store('avatars', 'public');
+         $data['avatar'] = $path;
+     }
+
+  5. Update profile with validated data
+     $profile->update($data);
+
+  6. Commit transaction (save everything)
+     DB::commit();
+
+  7. Return updated profile
+     Returns: 200 with updated profile resource
+
+EXCEPTION HANDLING:
+  If any error occurs, catch and rollback:
+  DB::rollBack();
+  Returns: 500 with error message
+
+3.5 PASSWORD RESET FLOW (FORGOT PASSWORD)
+──────────────────────────────────────────
+
+STEP 1 - REQUEST RESET LINK
+ENDPOINT: POST /api/forgot-password
+
+CODE (AuthController::forgotPassword):
+  1. Validate email exists in database
+     ForgotPasswordRequest ensures email exists
+     
+  2. Find user
+     $user = User::where('email', $request->email)->first();
+  
+  3. Generate password reset token
+     $token = Password::broker()->createToken($user);
+     // Creates one-time token stored in password_resets table
+     // Default expiration: 60 minutes
+  
+  4. Send email with reset link
+     $user->notify(new PasswordResetNotification($token));
+     // Email contains: reset-password?token=xxx&email=user@example.com
+  
+  5. Return success message
+     Returns: 200 with message "Password reset link sent"
+
+STEP 2 - RESET PASSWORD
+ENDPOINT: POST /api/reset-password
+
+CODE (AuthController::resetPassword):
+  1. Validate request using ResetPasswordRequest
+     - token (required)
+     - email (required, exists in users)
+     - password (required, min 8, confirmed)
+
+  2. Use Password broker to reset
+     $response = Password::broker()->reset($credentials, callback);
+     The callback updates user password:
+       $user->password = Hash::make($password);
+       $user->save();
+
+  3. Check result
+     if ($response == Password::PASSWORD_RESET) {
+         // Success: token deleted, password updated
+         Returns: 200 with success message
+     } else {
+         // Failure: token expired or invalid
+         Returns: 400 with error message
+     }
+
+3.6 USER DELETION FLOW
+──────────────────────
+
+ENDPOINT: DELETE /api/user/{id}
+
+CODE (AuthController::destroy):
+  1. Authorize deletion (only user can delete themselves)
+     $this->authorize('delete', $user);
+     // UserPolicy::delete() checks user.id === model.id
+
+  2. Begin transaction
+     DB::beginTransaction();
+
+  3. Delete avatar if exists
+     Delete from storage/public/avatars/
+
+  4. Delete all tokens (user can't use token after account deleted)
+     $user->tokens()->delete();
+
+  5. Delete profile
+     $user->profile()->delete();
+
+  6. Delete user
+     $user->delete();
+
+  7. Commit transaction
+     DB::commit();
+
+  8. Return success
+     Returns: 200 with message "User deleted successfully"
+
+EXCEPTION HANDLING:
+  If error, rollback everything:
+  DB::rollBack();
+  Returns: 500 with error message
+
+===================================================================================
+4. CONCEPTS EXPLAINED
+===================================================================================
+
+4.1 AUTHENTICATION VS AUTHORIZATION
+───────────────────────────────────
+
+AUTHENTICATION: Who are you?
+  - Logging in with email/password
+  - Getting API token
+  - Sanctum checks if token is valid
+
+AUTHORIZATION: What can you do?
+  - Policies check if authenticated user can perform action
+  - $this->authorize('update', $user) fires UserPolicy::update()
+  - If fails → 403 Forbidden
+
+4.2 API TOKENS (SANCTUM)
+────────────────────────
+
+Laravel Sanctum provides simple, token-based API authentication.
+
+How it works:
+  1. User logs in → gets token
+  2. Client stores token (localStorage, secure storage)
+  3. Client sends token in Authorization header: Authorization: Bearer {token}
+  4. Laravel validates token using Sanctum middleware
+  5. If valid → $request->user() returns authenticated user
+  6. If invalid → 401 Unauthorized
+
+Token storage (personal_access_tokens table):
+  - tokenable_id: User's ID
+  - tokenable_type: "App\Models\User"
+  - name: 'auth_token'
+  - token: Hashed token
+  - abilities: ['*'] (all abilities)
+  - last_used_at: Timestamp
+  - created_at, updated_at
+
+4.3 PASSWORD HASHING
+────────────────────
+
+Why we hash passwords:
+  - Never store plain-text passwords
+  - If database breached, passwords still safe
+  - Passwords can't be "decrypted" (one-way hash)
+
+Laravel uses bcrypt (default):
+  $hashed = Hash::make($plainPassword);
+  // $2y$12$K1DY5 (bcrypt identifier)
+  // Includes salt (random data) to prevent rainbow tables
+
+Verification:
+  Hash::check($plainPassword, $hashedPassword);
+  // Returns true if passwords match, false otherwise
+
+4.4 SIGNED URLS (EMAIL VERIFICATION)
+─────────────────────────────────────
+
+Signed URLs prevent tampering and allow temporary access without authentication.
+
+How it works:
+  1. Generate URL with temporary signed route
+     URL::temporarySignedRoute(
+         'verification.verify',
+         Carbon::now()->addMinutes(60), // Expiration
+         ['id' => 1, 'hash' => 'abc123'] // Parameters
+     )
+     // Returns: /email/verify/1/abc123?expires=...&signature=...
+
+  2. Signature calculation
+     signature = HMAC-SHA256(
+         'GET /email/verify/1/abc123?expires=1704067200',
+         APP_KEY
+     )
+     // Uses app's APP_KEY for signing
+
+  3. URL validation
+     $request->hasValidSignature();
+     // Recalculates signature and compares with ?signature=
+     // If parameters changed → signature invalid
+     // If expired → $request->isExpired()
+
+4.5 DATABASE TRANSACTIONS
+─────────────────────────
+
+Transactions ensure all-or-nothing database operations.
+
+Problem example (without transaction):
+  1. Update user email ✓
+  2. Update profile [ERROR]
+  3. Database in inconsistent state (user updated, profile not)
+
+Solution (with transaction):
+  DB::beginTransaction();
+  try {
+      1. Update user email ✓
+      2. Update profile ✓
+      DB::commit(); // Both succeed
+  } catch (Exception $e) {
+      DB::rollBack(); // Both rollback
+      throw $e;
+  }
+
+Result: Database always consistent (atomic operation).
+
+4.6 FORM REQUESTS (VALIDATION & AUTHORIZATION)
+──────────────────────────────────────────────
+
+Typical request flow:
+  1. POST /api/user/1 with request data
+  2. Laravel matches route and controller method
+  3. Route has type-hint: function update(UpdateRequest $request, User $user)
+  4. Laravel resolves UpdateRequest:
+     a. Calls authorize() → checks policy
+        If false → throw AuthorizationException → 403
+     b. Calls validate() → applies rules
+        If invalid → throw ValidationException → 422
+     c. If passes → inject into controller method
+  5. Controller receives validated, authorized request
+
+Validation rules syntax:
+  'field' => 'required|string|max:255'
+  // | separates multiple rules
+  // required: field must exist
+  // string: must be string
+  // max:255: max 255 characters
+
+Rule::unique('table', 'column')->ignore($id)
+  // Ensures unique value except for $id
+  // Used for updates (allow same value for same record)
+
+4.7 ELOQUENT RELATIONSHIPS
+──────────────────────────
+
+User model:
+  public function profile() {
+      return $this->hasOne(Profile::class);
+  }
+  // User has ONE profile
+  // Automatically uses user_id foreign key
+
+Profile model:
+  public function user() {
+      return $this->belongsTo(User::class);
+  }
+  // Profile belongs to ONE user
+  // Foreign key: user_id
+
+Usage:
+  $user = User::find(1);
+  $profile = $user->profile; // Automatic query
+  
+  $profile = Profile::find(1);
+  $user = $profile->user; // Automatic query
+  
+  $user->profile()->create(['bio' => '...']); // Creates profile for user
+
+===================================================================================
+5. ISSUES FOUND & FIXED
+===================================================================================
+
+ISSUE #1: AuthServiceProvider Incorrect Extension
+─────────────────────────────────────────────────
+
+BEFORE:
+  class AuthServiceProvider extends ServiceProvider {
+      protected $policies = [...];
+      public function boot() {
+          // Empty
+      }
+  }
+
+PROBLEM:
+  - Extended generic ServiceProvider instead of AuthServiceProvider
+  - Policies defined but never registered
+  - $this->authorize() calls wouldn't work (policies not registered)
+
+AFTER:
+  use Illuminate\Foundation\Support\Providers\AuthServiceProvider as ServiceProvider;
+  
+  class AuthServiceProvider extends ServiceProvider {
+      protected $policies = [...];
+      public function boot() {
+          $this->registerPolicies();
+      }
+  }
+
+FIX: Call $this->registerPolicies() to register policies with Laravel's authorization gate.
+
+ISSUE #2: User Model Incorrect Casts Method
+────────────────────────────────────────────
+
+BEFORE:
+  protected function casts(): array {
+      return [
+          'email_verified_at' => 'datetime',
+          'password' => 'hashed',
+      ];
+  }
+
+PROBLEM:
+  - Eloquent expects $casts property, not casts() method
+  - Method silently ignored
+  - email_verified_at stored as string, not DateTime object
+  - Password never hashed (hashing doesn't work via $casts)
+
+AFTER:
+  protected $casts = [
+      'email_verified_at' => 'datetime',
+      'password' => 'hashed',
+  ];
+
+FIX: Changed to property so Eloquent recognizes and applies casting.
+
+ISSUE #3: Missing Imports in User Model
+───────────────────────────────────────
+
+BEFORE:
+  public function sendEmailVerificationNotification() {
+      $url = URL::temporarySignedRoute(...);
+      $this->notify(new VerifyEmailWithCustomUrl($url));
+  }
+  // URL and Carbon used but not imported
+
+AFTER:
+  use Illuminate\Support\Facades\URL;
+  use Illuminate\Support\Carbon;
+
+FIX: Added missing imports for facades/classes used in model.
+
+ISSUE #4: Email Verification Using EmailVerificationRequest
+───────────────────────────────────────────────────────────
+
+BEFORE:
+  Route::get('/email/verify/{id}/{hash}', 
+      [EmailVerificationController::class, 'verify']
+  );
+
+  public function verify(EmailVerificationRequest $request) {
+      $request->fulfill();
+      return response()->json([...]);
+  }
+
+PROBLEM:
+  - EmailVerificationRequest type-hints in constructor
+  - It's a FormRequest that tries to authorize using $this->user()
+  - When user clicks email link: No session → No authenticated user → $this->user() returns null
+  - Calling $user->getKey() on null → ERROR: "getKey() on null"
+
+AFTER:
+  public function verify(Request $request, $id, $hash) {
+      if (!$request->hasValidSignature()) return error(...);
+      
+      $user = User::findOrFail($id);
+      if (!hash_equals(sha1($user->getEmailForVerification()), $hash)) 
+          return error(...);
+      
+      $user->markEmailAsVerified();
+      event(new Verified($user));
+      
+      return response()->json([...]);
+  }
+
+FIX: Use plain Request instead of FormRequest, manually validate signature and hash.
+
+ISSUE #5: UpdateRequest Email Unique Rule
+──────────────────────────────────────────
+
+BEFORE:
+  public function rules(): array {
+      return [
+          'email' => 'nullable|email|unique:users,email',
+      ];
+  }
+
+PROBLEM:
+  - unique:users,email checks all users
+  - When user tries to update with same email → validation error (email already exists)
+  - User can't update profile without changing email
+
+AFTER:
+  use Illuminate\Validation\Rule;
+  
+  public function rules(): array {
+      $user = $this->route('user');
+      return [
+          'email' => [
+              'nullable',
+              'email',
+              Rule::unique('users', 'email')->ignore($user->id)
+          ],
+      ];
+  }
+
+FIX: Use Rule::unique()->ignore($user->id) to exclude current user from uniqueness check.
+
+ISSUE #6: Login Without Email Verification Check
+────────────────────────────────────────────────
+
+BEFORE:
+  public function login(LoginRequest $request) {
+      // ... validation, password check ...
+      $token = $user->createToken('auth_token')->plainTextToken;
+      return response()->json(['token' => $token]);
+  }
+
+PROBLEM:
+  - Unverified users can login
+  - Defeats purpose of email verification
+  - Security risk: fake emails can access system
+
+AFTER:
+  public function login(LoginRequest $request) {
+      // ... validation, password check ...
+      
+      if (!$user->hasVerifiedEmail()) {
+          return response()->json([
+              'message' => 'Please verify your email before logging in.',
+              'requires_verification' => true
+          ], 403);
+      }
+      
+      $token = $user->createToken('auth_token')->plainTextToken;
+      return response()->json(['token' => $token]);
+  }
+
+FIX: Check $user->hasVerifiedEmail() before issuing token.
+
+ISSUE #7: Missing VerifyEmailWithCustomUrl Notification
+─────────────────────────────────────────────────────────
+
+BEFORE:
+  - app/Notifications folder exists but empty
+  - User model references VerifyEmailWithCustomUrl
+  - When sending verification email → ClassNotFoundException
+
+AFTER:
+  - Created VerifyEmailWithCustomUrl notification
+  - Implements custom email template
+  - Implements ShouldQueue for async sending
+
+FIX: Implemented notification with proper mail message format.
+
+ISSUE #8: Profile Model Unnecessary HasApiTokens Trait
+────────────────────────────────────────────────────────
+
+BEFORE:
+  class Profile extends Model {
+      use HasFactory, HasApiTokens;
+  }
+
+PROBLEM:
+  - Only User models need API tokens
+  - HasApiTokens adds morphMany relationship
+  - Bloats Profile model with unnecessary code
+  - Can cause confusion about how tokens work
+
+AFTER:
+  class Profile extends Model {
+      use HasFactory;
+  }
+
+FIX: Removed HasApiTokens trait.
+
+ISSUE #9: UserPolicy Double Semicolon
+──────────────────────────────────────
+
+BEFORE:
+  public function update(User $user, User $model): bool {
+      return $user->id === $model->id;;
+  }
+
+PROBLEM:
+  - Syntax error (double semicolon)
+  - PHP tolerates but indicates code quality issue
+
+AFTER:
+  public function update(User $user, User $model): bool {
+      return $user->id === $model->id;
+  }
+
+FIX: Removed extra semicolon.
+
+ISSUE #10: Missing Password Reset Implementation
+────────────────────────────────────────────────
+
+BEFORE:
+  - No forgot-password functionality
+  - Users can't recover forgotten passwords
+
+AFTER:
+  - Implemented ForgotPasswordRequest validation
+  - Implemented ResetPasswordRequest validation
+  - Created PasswordResetNotification
+  - Added forgotPassword() controller method
+  - Added resetPassword() controller method
+  - Added API routes for both endpoints
+
+FIX: Implemented complete password reset flow using Laravel's Password broker.
+
+===================================================================================
+6. HOW EVERYTHING WORKS TOGETHER
+===================================================================================
+
+6.1 COMPLETE USER JOURNEY
+─────────────────────────
+
+SCENARIO: John registers, verifies email, updates profile, resets password
+
+STEP 1: Registration
+  John fills form: Name, Email, Password
+  → POST /api/register
+  → RegisterRequest validates input
+  → User created, profile created, token generated
+  → Email sent: "Verify your email - click link"
+  Response: token + message "Please verify email"
+
+STEP 2: Email Verification
+  John opens email, clicks verification link
+  → GET /api/email/verify/1/abc123?expires=...&signature=...
+  → EmailVerificationController validates signature
+  → Confirms hash matches email
+  → Sets email_verified_at = NOW
+  → Event fires (future notifications)
+  Response: "Email verified successfully"
+
+STEP 3: Login
+  John fills form: Email, Password
+  → POST /api/login
+  → LoginRequest validates
+  → User found, password matches
+  → Checks email verified ✓
+  → Token created
+  → Token stored in personal_access_tokens table
+  Response: token
+
+STEP 4: Update Profile
+  John uploads avatar and fills profile info
+  → PUT /api/profile (with Authorization header)
+  → Sanctum middleware validates token
+  → ProfileController::update() called
+  → UpdateProfileRequest validates
+  → ProfilePolicy::update() checks ownership
+  → Avatar uploaded to storage
+  → Profile updated in database
+  Response: updated profile data
+
+STEP 5: Logout
+  John clicks logout
+  → POST /api/logout (with token)
+  → Current token deleted
+  Response: "Logged out"
+
+STEP 6: Forgot Password
+  John forgot password, fills email
+  → POST /api/forgot-password
+  → Email found in database
+  → Password reset token generated
+  → Email sent: "Reset your password - click link"
+  Response: "Check your email"
+
+STEP 7: Reset Password
+  John clicks email link, fills new password
+  → POST /api/reset-password with token
+  → ResetPasswordRequest validates
+  → Password broker verifies token
+  → Password hashed and updated
+  → Token deleted (one-time use)
+  Response: "Password reset successfully"
+
+STEP 8: Login with New Password
+  John logs in with new password
+  → Repeat Step 3
+  Success!
+
+6.2 ROLE OF EACH FILE
+──────────────────────
+
+USER MODEL (app/Models/User.php):
+  - Extends Authenticatable (for auth)
+  - Implements MustVerifyEmail (for email verification)
+  - Defines profile relationship
+  - Casts email_verified_at to datetime, password to hashed
+  - Has method sendEmailVerificationNotification()
+
+PROFILE MODEL (app/Models/Profile.php):
+  - Extends Model
+  - Stores profile fields: bio, phone, avatar, gender, dob, country, city
+  - Relationship: belongs to User
+  - Mass assignable fields
+
+AUTH CONTROLLER (app/Http/Controllers/Auth/AuthController.php):
+  - register(): Creates user + profile + token + sends email
+  - login(): Validates credentials + checks verified + creates token
+  - logout(): Deletes current token
+  - update(): Updates user attributes (with policy check)
+  - destroy(): Deletes user account + all data (with policy check)
+  - forgotPassword(): Generates reset token + sends email
+  - resetPassword(): Validates token + updates password
+
+PROFILE CONTROLLER (app/Http/Controllers/ProfileController.php):
+  - show(): Returns authenticated user's profile (with policy check)
+  - update(): Updates profile + handles avatar upload (with policy check)
+  - destroy(): Deletes profile (with policy check)
+
+EMAIL VERIFICATION CONTROLLER (app/Http/Controllers/Auth/EmailVerificationController.php):
+  - verify(): Validates signed URL + marks email verified
+  - send(): Sends verification email to authenticated user
+
+FORM REQUESTS:
+  - RegisterRequest: Validates registration data
+  - LoginRequest: Validates login data
+  - UpdateRequest: Validates user update + checks policy + handles unique email
+  - UpdateProfileRequest: Validates profile update
+  - ForgotPasswordRequest: Validates email exists
+  - ResetPasswordRequest: Validates token + email + password
+
+POLICIES:
+  - UserPolicy: Controls user update/delete authorization
+  - ProfilePolicy: Controls profile update/delete authorization
+
+RESOURCES:
+  - UserResource: Transforms User to JSON
+  - ProfileResource: Transforms Profile to JSON
+
+NOTIFICATIONS:
+  - VerifyEmailWithCustomUrl: Sends verification email
+  - PasswordResetNotification: Sends password reset email
+
+ROUTES:
+  API routes (routes/api.php): All backend API endpoints
+  Web routes (routes/web.php): Frontend Blade views + form submission endpoints
+
+VIEWS:
+  - layouts/app.blade.php: Master template with styles
+  - auth/register.blade.php: Registration form
+  - auth/login.blade.php: Login form
+  - auth/verify-email.blade.php: Email verification info
+  - auth/forgot-password.blade.php: Forgot password form
+  - auth/reset-password.blade.php: Reset password form
+  - profile/index.blade.php: Profile management + profile info + logout
+
+===================================================================================
+7. API ENDPOINTS REFERENCE
+===================================================================================
+
+PUBLIC ENDPOINTS (No Authentication Required):
+
+1. Register User
+   POST /api/register
+   Body: { "name": "John", "email": "john@example.com", "password": "password", "password_confirmation": "password" }
+   Response: 201 { "success": true, "token": "...", "message": "...", "requires_verification": true }
+
+2. Login
+   POST /api/login
+   Body: { "email": "john@example.com", "password": "password" }
+   Response: 200 { "message": "Login successful", "token": "...", "user": {...} }
+   If not verified: 403 { "message": "Please verify your email before logging in" }
+
+3. Verify Email
+   GET /api/email/verify/{id}/{hash}?expires=...&signature=...
+   Response: 200 { "message": "Email verified successfully" }
+   If already verified: 400 { "message": "Email is already verified" }
+   If invalid: 400 { "message": "Invalid verification link" }
+
+4. Forgot Password
+   POST /api/forgot-password
+   Body: { "email": "john@example.com" }
+   Response: 200 { "success": true, "message": "Password reset link sent to your email" }
+
+5. Reset Password
+   POST /api/reset-password
+   Body: { "token": "...", "email": "john@example.com", "password": "newpass", "password_confirmation": "newpass" }
+   Response: 200 { "success": true, "message": "Password reset successfully" }
+   If failed: 400 { "success": false, "message": "Failed to reset password" }
+
+PROTECTED ENDPOINTS (Require Authentication - Bearer Token):
+
+6. Get Current User
+   GET /api/user
+   Header: Authorization: Bearer {token}
+   Response: 200 { "id": 1, "name": "John", "email": "john@example.com", ... }
+
+7. Update Current User
+   PUT /api/user/{id}
+   Header: Authorization: Bearer {token}
+   Body: { "name": "John Doe", "email": "john@example.com", "password": "newpass" }
+   Response: 200 { "success": true, "message": "User updated successfully", "data": {...} }
+
+8. Delete Current User (Account Deletion)
+   DELETE /api/user/{id}
+   Header: Authorization: Bearer {token}
+   Response: 200 { "success": true, "message": "User deleted successfully" }
+
+9. Get Current User's Profile
+   GET /api/profile
+   Header: Authorization: Bearer {token}
+   Response: 200 { "bio": "...", "phone": "...", ... }
+
+10. Update Current User's Profile
+    PUT /api/profile
+    Header: Authorization: Bearer {token}
+    Body: { "bio": "Developer", "phone": "123", "avatar": <file>, ... }
+    Response: 200 { "success": true, "message": "Profile updated successfully", "data": {...} }
+
+11. Delete Current User's Profile
+    DELETE /api/profile
+    Header: Authorization: Bearer {token}
+    Response: 200 { "success": true, "message": "Profile deleted successfully" }
+
+12. Logout
+    POST /api/logout
+    Header: Authorization: Bearer {token}
+    Response: 200 { "message": "Logged out successfully" }
+
+13. Send Verification Email
+    POST /api/email/verification-notification
+    Header: Authorization: Bearer {token}
+    Response: 200 { "message": "Verification email sent successfully" }
+
+===================================================================================
+8. TESTING GUIDE
+===================================================================================
+
+8.1 TESTING WITH POSTMAN / INSOMNIA
+────────────────────────────────────
+
+SCENARIO 1: Register & Verify
+
+1. Register:
+   POST http://localhost:8000/api/register
+   Body (JSON):
+   {
+     "name": "John Doe",
+     "email": "john@example.com",
+     "password": "password123",
+     "password_confirmation": "password123"
+   }
+   Expected: 201, get token
+
+2. Check Database:
+   SELECT * FROM users WHERE email = 'john@example.com';
+   → email_verified_at is NULL (not verified)
+   
+3. Get Verification URL from Email:
+   Check your email provider's log or use Laravel Telescope to get verification link
+   Format: http://localhost:8000/api/email/verify/1/abc123?expires=...&signature=...
+
+4. Verify Email:
+   GET http://localhost:8000/api/email/verify/1/abc123?expires=...&signature=...
+   Expected: 200, "Email verified successfully"
+
+5. Check Database:
+   SELECT * FROM users WHERE email = 'john@example.com';
+   → email_verified_at is set (verified)
+
+SCENARIO 2: Login
+
+1. Try Login Before Verification (after registration):
+   POST http://localhost:8000/api/login
+   Body: { "email": "john@example.com", "password": "password123" }
+   Expected: 403, "Please verify your email before logging in"
+
+2. Try Login After Verification:
+   POST http://localhost:8000/api/login
+   Body: { "email": "john@example.com", "password": "password123" }
+   Expected: 200, get token
+
+SCENARIO 3: Update Profile
+
+1. Get Profile:
+   GET http://localhost:8000/api/profile
+   Header: Authorization: Bearer {token_from_login}
+   Expected: 200, profile data (might be empty initially)
+
+2. Update Profile:
+   PUT http://localhost:8000/api/profile
+   Header: Authorization: Bearer {token_from_login}
+   Body (form-data):
+     bio: "Software Developer"
+     phone: "1234567890"
+     gender: "Male"
+     country: "USA"
+     city: "New York"
+   Expected: 200, updated profile
+
+3. Verify Update:
+   GET http://localhost:8000/api/profile
+   Header: Authorization: Bearer {token}
+   → New data visible
+
+SCENARIO 4: Password Reset
+
+1. Forgot Password:
+   POST http://localhost:8000/api/forgot-password
+   Body: { "email": "john@example.com" }
+   Expected: 200, "Password reset link sent"
+
+2. Get Reset Token:
+   Check email for reset link
+   Extract token from link
+
+3. Reset Password:
+   POST http://localhost:8000/api/reset-password
+   Body: {
+     "token": "...",
+     "email": "john@example.com",
+     "password": "newpassword123",
+     "password_confirmation": "newpassword123"
+   }
+   Expected: 200, "Password reset successfully"
+
+4. Login with New Password:
+   POST http://localhost:8000/api/login
+   Body: { "email": "john@example.com", "password": "newpassword123" }
+   Expected: 200, new token
+
+8.2 TESTING DATABASE TRANSACTIONS
+──────────────────────────────────
+
+Test that profile deletion with user deletion is atomic:
+
+1. Get user count:
+   SELECT COUNT(*) FROM users; → 5
+
+2. Get profile count:
+   SELECT COUNT(*) FROM profiles; → 5
+
+3. Delete User:
+   DELETE /api/user/1 (with authorization)
+   Expected: 200
+
+4. Check counts:
+   SELECT COUNT(*) FROM users; → 4 (user deleted)
+   SELECT COUNT(*) FROM profiles; → 4 (profile deleted)
+   SELECT COUNT(*) FROM personal_access_tokens; → (tokens deleted)
+
+If error occurred during deletion, rollback would restore both.
+
+8.3 TESTING AUTHORIZATION (POLICIES)
+──────────────────────────────────────
+
+Test that users can only update their own profile:
+
+User 1 token:
+  t1 = login as john@example.com
+
+User 2 token:
+  t2 = login as jane@example.com
+
+Attempt to update User 1's profile as User 2:
+  PUT /api/profile
+  Header: Authorization: Bearer {t2}
+  Body: { "bio": "Hacked!" }
+  Expected: 403 Forbidden (authorization error)
+
+User 1 update their own profile:
+  PUT /api/profile
+  Header: Authorization: Bearer {t1}
+  Body: { "bio": "My bio" }
+  Expected: 200 Success
+
+8.4 TESTING VALIDATION (FORM REQUESTS)
+────────────────────────────────────────
+
+Test registration with invalid email:
+  POST /api/register
+  Body: { "name": "John", "email": "invalid-email", "password": "pass123", "password_confirmation": "pass123" }
+  Expected: 422 Validation Error with message "The email field must be a valid email"
+
+Test registration with duplicate email:
+  POST /api/register with email already used
+  Expected: 422 "The email has already been taken"
+
+Test registration with short password:
+  POST /api/register with password "pass"
+  Expected: 422 "The password field must be at least 8 characters"
+
+Test registration without password confirmation match:
+  POST /api/register with password "password123", password_confirmation "different"
+  Expected: 422 "The password field confirmation does not match"
+
+===================================================================================
+9. QUICK START COMMANDS
+===================================================================================
+
+Setup:
+php artisan migrate                 # Create tables
+php artisan serve                   # Start dev server on http://localhost:8000
+php artisan tinker                  # Interactive shell for testing
+
+Useful Commands:
+php artisan route:list              # See all routes
+php artisan db:seed                 # Run seeders
+php artisan cache:clear             # Clear cache
+php artisan config:cache            # Cache configuration
+php artisan storage:link            # Create public/storage symlink
+
+===================================================================================
+10. SECURITY BEST PRACTICES IMPLEMENTED
+===================================================================================
+
+✓ Passwords hashed with bcrypt
+✓ Signed URLs for email verification (prevent tampering)
+✓ Temporal expiration on signed URLs (60 min)
+✓ Hash::check() for password verification (prevent timing attacks)
+✓ Authorization policies for sensitive operations
+✓ Database transactions for consistency
+✓ Email verification required for login
+✓ Token-based API authentication with Sanctum
+✓ Form request validation on all inputs
+✓ CSRF protection on web forms (@csrf)
+✓ Password reset tokens one-time use
+✓ Old tokens deleted on logout
+✓ Separate API and web routes
+
+===================================================================================
+CONCLUSION
+===================================================================================
+
+This project demonstrates real-world Laravel best practices:
+- MVC architecture with clear separation of concerns
+- Authorization with Policies
+- Validation with Form Requests
+- API Resources for response transformation
+- Notifications for asynchronous communication
+- Database transactions for data consistency
+- Signed URLs for temporary token-free access
+- Complete authentication flow from registration to password reset
+
+Key takeaways:
+1. Always validate and authorize
+2. Hash passwords, never store plain text
+3. Use transactions for complex operations
+4. Separate business logic into dedicated classes
+5. Use policies for authorization
+6. Implement email verification for security
+7. Provide password reset functionality
+8. Test authorization and validation thoroughly
+
+===================================================================================

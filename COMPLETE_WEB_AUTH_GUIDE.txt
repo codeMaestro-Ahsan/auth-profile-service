@@ -1,0 +1,846 @@
+================================================================================
+COMPLETE WEB AUTHENTICATION & PROFILE MANAGEMENT SYSTEM GUIDE
+================================================================================
+Laravel 12 with Sanctum, Session-Based Auth, Email Verification & Profiles
+================================================================================
+
+TABLE OF CONTENTS:
+1. Project Architecture Overview
+2. Database Setup & Migrations
+3. Authentication System (Registration & Login)
+4. Email Verification Flow
+5. Password Reset Implementation
+6. Profile Management System
+7. Web Routing & Middleware
+8. Controller Implementation
+9. Blade Views & Flash Messages
+10. Complete Code Examples
+
+================================================================================
+SECTION 1: PROJECT ARCHITECTURE OVERVIEW
+================================================================================
+
+DUAL AUTHENTICATION SYSTEM:
+- API Routes (/api/*) → Token-based authentication using Sanctum
+- Web Routes (/*) → Session-based authentication with redirects & views
+
+KEY CONCEPTS:
+1. Session-Based Auth: User logs in, Laravel creates session cookie
+2. Sanctum Tokens: API requests use Bearer tokens
+3. Email Verification: Users must verify email before accessing features
+4. Middleware: Controls access (guest for unauthenticated, auth for protected)
+5. Policies: Authorization rules (who can edit what)
+
+FILE STRUCTURE:
+auth-profile-service/
+├── app/
+│   ├── Models/
+│   │   ├── User.php (has email_verified_at, profile relationship)
+│   │   ├── Profile.php (stores user profile data)
+│   ├── Http/Controllers/
+│   │   ├── Auth/
+│   │   │   ├── AuthController.php (register, login, logout, password reset)
+│   │   │   ├── EmailVerificationController.php
+│   │   ├── Web/
+│   │   │   ├── ProfileController.php (dashboard, edit, update)
+│   │   │   ├── UserController.php (list users, show profiles)
+│   ├── Notifications/
+│   │   ├── VerifyEmailWithCustomUrl.php
+│   ├── Policies/
+│   │   ├── ProfilePolicy.php
+│   ├── Requests/Auth/
+│   │   ├── RegisterRequest.php
+│   │   ├── LoginRequest.php
+├── routes/
+│   ├── web.php (session-based routes)
+│   ├── api.php (token-based routes)
+├── resources/views/
+│   ├── layouts/main.blade.php (master layout)
+│   ├── auth/ (register, login, verify, forgot-password, reset-password)
+│   ├── profile/ (dashboard, edit)
+│   ├── users/ (index, show)
+├── database/
+│   ├── migrations/
+│   │   ├── create_users_table.php
+│   │   ├── create_profiles_table.php
+
+================================================================================
+SECTION 2: DATABASE SETUP & MIGRATIONS
+================================================================================
+
+USERS TABLE:
+```sql
+CREATE TABLE users (
+    id BIGINT PRIMARY KEY,
+    name VARCHAR(255),
+    email VARCHAR(255) UNIQUE,
+    email_verified_at TIMESTAMP NULL,
+    password VARCHAR(255),
+    remember_token VARCHAR(100),
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+```
+
+PROFILES TABLE:
+```sql
+CREATE TABLE profiles (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT FOREIGN KEY,
+    avatar VARCHAR(255) NULL,
+    bio TEXT NULL,
+    phone VARCHAR(20) NULL,
+    gender VARCHAR(20) NULL,
+    dob DATE NULL,
+    country VARCHAR(100) NULL,
+    city VARCHAR(100) NULL,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+```
+
+CONCEPTS:
+- email_verified_at: NULL = not verified, timestamp = verified
+- hasVerifiedEmail(): Check if user verified email
+- markEmailAsVerified(): Mark user as verified
+- Profile: Separate table for one-to-one relationship with User
+
+================================================================================
+SECTION 3: AUTHENTICATION SYSTEM (REGISTRATION & LOGIN)
+================================================================================
+
+CONCEPT: Users provide credentials, system validates, creates session, redirects
+
+REGISTRATION FLOW:
+1. User fills registration form
+2. System validates input (RegisterRequest)
+3. Create user with hashed password
+4. Create associated profile
+5. Send verification email
+6. Redirect to verification page
+
+EXAMPLE CODE - Model Relationship (User.php):
+
+```php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+class User extends Model {
+    protected $fillable = ['name', 'email', 'password'];
+    
+    // One user has one profile
+    public function profile(): HasOne {
+        return $this->hasOne(Profile::class);
+    }
+}
+```
+
+EXAMPLE CODE - Controller Registration (AuthController.php):
+
+```php
+public function registerWeb(RegisterRequest $request) {
+    // 1. Validate input (RegisterRequest handles this)
+    $validated = $request->validated();
+    
+    // 2. Create user with hashed password
+    $user = User::create([
+        'name' => $validated['name'],
+        'email' => $validated['email'],
+        'password' => Hash::make($validated['password']),
+    ]);
+    
+    // 3. Create empty profile for user
+    $user->profile()->create([]);
+    
+    // 4. Send verification email
+    $this->sendVerificationEmail($user);
+    
+    // 5. Redirect with message
+    return redirect('/verify-email/' . $user->id)
+        ->with('success', 'Registration successful! Check your email.');
+}
+
+private function sendVerificationEmail(User $user) {
+    $verificationUrl = URL::temporarySignedRoute(
+        'verify-email',
+        now()->addHours(24),
+        ['id' => $user->id, 'hash' => sha1($user->email)]
+    );
+    
+    $user->notify(new VerifyEmailWithCustomUrl($verificationUrl));
+}
+```
+
+LOGIN FLOW:
+1. User enters email and password
+2. Find user by email
+3. Verify password hash matches
+4. Check if email is verified
+5. Create session with Auth::login()
+6. Redirect to dashboard
+
+EXAMPLE CODE - Controller Login (AuthController.php):
+
+```php
+public function loginWeb(LoginRequest $request) {
+    // 1. Get validated credentials (email, password)
+    $credentials = $request->validated();
+    
+    // 2. Find user by email
+    $user = User::where('email', $credentials['email'])->first();
+    
+    // 3. Verify password
+    if (!$user || !Hash::check($credentials['password'], $user->password)) {
+        return back()->with('error', 'Invalid credentials');
+    }
+    
+    // 4. Check email verification
+    if (!$user->hasVerifiedEmail()) {
+        return back()->with('error', 'Please verify email first');
+    }
+    
+    // 5. Create session
+    Auth::login($user, $request->remember);
+    
+    // 6. Redirect to dashboard
+    return redirect('/dashboard')
+        ->with('success', 'Logged in successfully!');
+}
+```
+
+KEY FUNCTIONS:
+- Hash::make($password) → Hash password securely
+- Hash::check($input, $hash) → Verify password against hash
+- Auth::login($user) → Create session for user
+- Auth::user() → Get logged-in user
+- Auth::logout() → Destroy session
+
+================================================================================
+SECTION 4: EMAIL VERIFICATION FLOW
+================================================================================
+
+CONCEPT: Send signed URL to user's email, user clicks link to verify
+
+NOTIFICATION CLASS (VerifyEmailWithCustomUrl.php):
+
+```php
+namespace App\Notifications;
+use Illuminate\Notifications\Notification;
+use Illuminate\Notifications\Messages\MailMessage;
+
+class VerifyEmailWithCustomUrl extends Notification {
+    protected $verificationUrl;
+    
+    public function __construct($verificationUrl) {
+        $this->verificationUrl = $verificationUrl;
+    }
+    
+    public function via($notifiable) {
+        return ['mail']; // Send via email
+    }
+    
+    public function toMail($notifiable) {
+        return (new MailMessage)
+            ->subject('Verify Email Address')
+            ->line('Click link to verify your email:')
+            ->action('Verify Email', $this->verificationUrl)
+            ->line('Link expires in 24 hours');
+    }
+}
+```
+
+VERIFICATION CONTROLLER (EmailVerificationController.php):
+
+```php
+public function verifyWeb($id, $hash) {
+    // 1. Find user
+    $user = User::findOrFail($id);
+    
+    // 2. Check if already verified
+    if ($user->hasVerifiedEmail()) {
+        return view('auth.verify', ['verified' => true]);
+    }
+    
+    // 3. Verify hash matches
+    if (!hash_equals(sha1($user->getEmailForVerification()), $hash)) {
+        return view('auth.verify', ['verified' => false]);
+    }
+    
+    // 4. Mark as verified
+    $user->markEmailAsVerified();
+    
+    // 5. Return success view
+    return view('auth.verify', ['verified' => true]);
+}
+```
+
+VERIFICATION VIEW (resources/views/auth/verify.blade.php):
+
+```blade
+@extends('layouts.main')
+
+@section('title', 'Email Verification')
+
+@section('content')
+<div class="max-w-md mx-auto text-center">
+    @if($verified)
+        <div class="bg-green-100 p-6 rounded-lg">
+            <h2 class="text-2xl font-bold text-green-800">✓ Email Verified!</h2>
+            <p class="text-gray-700 mt-2">Your email has been verified successfully.</p>
+            <a href="/login" class="gradient-bg text-white px-6 py-2 rounded mt-4 inline-block">
+                Go to Login
+            </a>
+        </div>
+    @else
+        <div class="bg-red-100 p-6 rounded-lg">
+            <h2 class="text-2xl font-bold text-red-800">✗ Verification Failed</h2>
+            <p class="text-gray-700 mt-2">Invalid or expired link.</p>
+            <a href="/register" class="gradient-bg text-white px-6 py-2 rounded mt-4 inline-block">
+                Register Again
+            </a>
+        </div>
+    @endif
+</div>
+@endsection
+```
+
+================================================================================
+SECTION 5: PASSWORD RESET IMPLEMENTATION
+================================================================================
+
+CONCEPT: User requests reset, system sends email with token link, user sets new password
+
+FORGOT PASSWORD FLOW:
+
+```php
+public function forgotPasswordWeb(ForgotPasswordRequest $request) {
+    // 1. Find user by email
+    $user = User::where('email', $request->email)->first();
+    
+    if (!$user) {
+        return back()->with('error', 'Email not found');
+    }
+    
+    // 2. Generate reset token (Laravel Password Broker)
+    $token = Password::createToken($user);
+    
+    // 3. Send reset email with token link
+    Password::sendResetLink(['email' => $request->email]);
+    
+    // 4. Redirect with message
+    return back()->with('success', 'Password reset link sent to your email!');
+}
+```
+
+RESET PASSWORD FLOW:
+
+```php
+public function resetPasswordWeb(ResetPasswordRequest $request) {
+    // 1. Validate token and email
+    $status = Password::reset(
+        $request->only('email', 'password', 'password_confirmation', 'token'),
+        function ($user, $password) {
+            $user->update(['password' => Hash::make($password)]);
+        }
+    );
+    
+    // 2. If successful, redirect to login
+    if ($status === Password::PASSWORD_RESET) {
+        return redirect('/login')
+            ->with('success', 'Password reset successfully!');
+    }
+    
+    // 3. If failed, show error
+    return back()->with('error', 'Invalid or expired token');
+}
+```
+
+================================================================================
+SECTION 6: PROFILE MANAGEMENT SYSTEM
+================================================================================
+
+CONCEPT: Separate Profile model stores user-specific data like avatar, bio, etc.
+
+PROFILE MODEL (App/Models/Profile.php):
+
+```php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class Profile extends Model {
+    protected $fillable = [
+        'bio', 'phone', 'gender', 'dob', 'country', 'city', 'avatar'
+    ];
+    
+    public function user(): BelongsTo {
+        return $this->belongsTo(User::class);
+    }
+}
+```
+
+PROFILE CONTROLLER (App/Http/Controllers/Web/ProfileController.php):
+
+```php
+public function edit() {
+    // Show edit form
+    $profile = Auth::user()->profile;
+    return view('profile.edit', compact('profile'));
+}
+
+public function updateWeb(Request $request) {
+    // 1. Validate input
+    $validated = $request->validate([
+        'bio' => 'nullable|string|max:500',
+        'avatar' => 'nullable|image|mimes:jpeg,png|max:2048',
+        'phone' => 'nullable|string|max:20',
+        'gender' => 'nullable|in:male,female,other',
+        'country' => 'nullable|string|max:100',
+        'city' => 'nullable|string|max:100',
+    ]);
+    
+    $profile = Auth::user()->profile;
+    
+    // 2. Handle avatar upload
+    if ($request->hasFile('avatar')) {
+        // Delete old avatar if exists
+        if ($profile->avatar && Storage::disk('public')->exists($profile->avatar)) {
+            Storage::disk('public')->delete($profile->avatar);
+        }
+        // Store new avatar
+        $path = $request->file('avatar')->store('avatars', 'public');
+        $validated['avatar'] = $path;
+    }
+    
+    // 3. Update profile
+    $profile->update($validated);
+    
+    // 4. Redirect with success
+    return redirect('/dashboard')
+        ->with('success', 'Profile updated successfully!');
+}
+```
+
+PROFILE VIEW (resources/views/profile/edit.blade.php):
+
+```blade
+@extends('layouts.main')
+
+@section('content')
+<div class="max-w-2xl mx-auto">
+    <h2 class="text-3xl font-bold mb-8">Edit Profile</h2>
+    
+    <form method="POST" action="/profile/update" enctype="multipart/form-data" 
+          class="bg-white rounded-lg shadow-md p-6">
+        @csrf
+        
+        <!-- Avatar Upload -->
+        <div class="mb-6">
+            <label class="block text-sm font-bold mb-2">Avatar</label>
+            <input type="file" name="avatar" accept="image/*" 
+                   class="w-full border rounded px-3 py-2 @error('avatar') border-red-500 @enderror">
+            @error('avatar')
+                <span class="text-red-500 text-sm">{{ $message }}</span>
+            @enderror
+        </div>
+        
+        <!-- Bio -->
+        <div class="mb-6">
+            <label class="block text-sm font-bold mb-2">Bio</label>
+            <textarea name="bio" rows="3" 
+                      class="w-full border rounded px-3 py-2">{{ old('bio', $profile->bio) }}</textarea>
+        </div>
+        
+        <!-- More fields... -->
+        
+        <button type="submit" class="gradient-bg text-white px-6 py-2 rounded">
+            Save Changes
+        </button>
+    </form>
+</div>
+@endsection
+```
+
+================================================================================
+SECTION 7: WEB ROUTING & MIDDLEWARE
+================================================================================
+
+CONCEPT: Routes define URLs, middleware controls access (guest/auth)
+
+ROUTE FILE (routes/web.php):
+
+```php
+<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Auth\EmailVerificationController;
+use App\Http\Controllers\Web\ProfileController;
+use App\Http\Controllers\Web\UserController;
+
+// HOME PAGE
+Route::get('/', fn() => view('welcome'));
+
+// GUEST ROUTES (only for non-authenticated users)
+Route::middleware('guest')->group(function () {
+    Route::get('/register', [AuthController::class, 'registerForm'])->name('register');
+    Route::post('/register', [AuthController::class, 'registerWeb']);
+    
+    Route::get('/login', [AuthController::class, 'loginForm'])->name('login');
+    Route::post('/login', [AuthController::class, 'loginWeb']);
+    
+    Route::get('/forgot-password', [AuthController::class, 'forgotPasswordForm']);
+    Route::post('/forgot-password', [AuthController::class, 'forgotPasswordWeb']);
+    
+    Route::get('/reset-password/{token}', [AuthController::class, 'resetPasswordForm']);
+    Route::post('/reset-password', [AuthController::class, 'resetPasswordWeb']);
+});
+
+// EMAIL VERIFICATION
+Route::get('/verify-email/{id}/{hash}', 
+    [EmailVerificationController::class, 'verifyWeb'])->name('verify-email');
+
+// AUTHENTICATED ROUTES (only for logged-in users)
+Route::middleware('auth')->group(function () {
+    Route::post('/logout', [AuthController::class, 'logoutWeb']);
+    
+    // Dashboard
+    Route::get('/dashboard', [ProfileController::class, 'dashboard']);
+    
+    // Profile Management
+    Route::get('/profile/edit', [ProfileController::class, 'edit']);
+    Route::post('/profile/update', [ProfileController::class, 'updateWeb']);
+    Route::post('/profile/delete', [ProfileController::class, 'deleteWeb']);
+    
+    // Account Settings
+    Route::get('/account/edit', [AuthController::class, 'editAccount']);
+    Route::post('/account/update', [AuthController::class, 'updateAccountWeb']);
+    Route::post('/account/delete', [AuthController::class, 'deleteAccountWeb']);
+    
+    // Users
+    Route::get('/users', [UserController::class, 'index']);
+    Route::get('/users/{user}', [UserController::class, 'show']);
+});
+```
+
+MIDDLEWARE EXPLANATION:
+- guest: Allows only non-authenticated users (if logged in, redirects to /dashboard)
+- auth: Allows only authenticated users (if not logged in, redirects to /login)
+
+================================================================================
+SECTION 8: CONTROLLER IMPLEMENTATION
+================================================================================
+
+KEY METHODS IN AuthController:
+
+1. registerWeb() - Handle registration form
+   - Validate input with RegisterRequest
+   - Hash password with Hash::make()
+   - Create user in database
+   - Create associated profile
+   - Send verification email
+   - Redirect to verification page
+
+2. loginWeb() - Handle login form
+   - Validate credentials with LoginRequest
+   - Find user by email
+   - Check password with Hash::check()
+   - Check email_verified_at is not NULL
+   - Create session with Auth::login()
+   - Redirect to dashboard
+
+3. logoutWeb() - Handle logout
+   - Auth::logout() destroys session
+   - Regenerate session token
+   - Redirect to home
+
+4. forgotPasswordWeb() - Request password reset
+   - Find user by email
+   - Generate token with Password::createToken()
+   - Send email
+   - Redirect with message
+
+5. resetPasswordWeb() - Process password reset
+   - Validate token, email, new password
+   - Use Password::reset() callback to hash and save
+   - Redirect to login
+
+KEY METHODS IN ProfileController:
+
+1. dashboard() - Show user's profile
+   - Get Auth::user()
+   - Get user's profile
+   - Return view with data
+
+2. edit() - Show edit form
+   - Get Auth::user()->profile
+   - Return edit view
+
+3. updateWeb() - Update profile
+   - Validate input
+   - Handle avatar upload (delete old, store new)
+   - Update profile in database
+   - Redirect with success message
+
+================================================================================
+SECTION 9: BLADE VIEWS & FLASH MESSAGES
+================================================================================
+
+MASTER LAYOUT (resources/views/layouts/main.blade.php):
+
+```blade
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>@yield('title', 'App') - AuthApp</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- NAVBAR -->
+    <nav class="gradient-bg text-white shadow-lg">
+        <div class="container mx-auto px-4 py-4 flex justify-between">
+            <a href="/" class="text-2xl font-bold">AuthApp</a>
+            <div class="flex gap-4">
+                @auth
+                    <span>Welcome, {{ Auth::user()->name }}</span>
+                    <a href="/dashboard">Dashboard</a>
+                    <form method="POST" action="/logout" class="inline">
+                        @csrf
+                        <button type="submit">Logout</button>
+                    </form>
+                @else
+                    <a href="/login">Login</a>
+                    <a href="/register">Register</a>
+                @endauth
+            </div>
+        </div>
+    </nav>
+    
+    <!-- FLASH MESSAGES -->
+    <div class="container mx-auto px-4 mt-4">
+        @if ($message = Session::get('success'))
+            <div class="bg-green-100 text-green-700 px-4 py-3 rounded alert">
+                {{ $message }}
+            </div>
+        @endif
+        
+        @if ($message = Session::get('error'))
+            <div class="bg-red-100 text-red-700 px-4 py-3 rounded alert">
+                {{ $message }}
+            </div>
+        @endif
+    </div>
+    
+    <!-- MAIN CONTENT -->
+    <main class="container mx-auto px-4 py-8">
+        @yield('content')
+    </main>
+    
+    <!-- FOOTER -->
+    <footer class="gradient-bg text-white mt-12 py-6 text-center">
+        <p>&copy; 2025 AuthApp. All rights reserved.</p>
+    </footer>
+    
+    <script>
+        // Auto-hide alerts after 5 seconds
+        setTimeout(() => {
+            document.querySelectorAll('.alert').forEach(el => {
+                el.style.display = 'none';
+            });
+        }, 5000);
+    </script>
+</body>
+</html>
+```
+
+USING @error DIRECTIVE FOR VALIDATION:
+
+```blade
+<div class="mb-6">
+    <label for="email" class="block font-bold">Email</label>
+    <input type="email" id="email" name="email" 
+           class="w-full border rounded px-3 py-2 @error('email') border-red-500 @enderror"
+           value="{{ old('email') }}">
+    @error('email')
+        <span class="text-red-500 text-sm">{{ $message }}</span>
+    @enderror
+</div>
+```
+
+FORM SUBMISSION WITH CSRF:
+
+```blade
+<form method="POST" action="/login">
+    @csrf
+    <!-- fields -->
+    <button type="submit">Login</button>
+</form>
+```
+
+BLADE AUTHENTICATION DIRECTIVES:
+
+```blade
+@auth
+    <!-- Show to authenticated users -->
+    <p>Hello, {{ Auth::user()->name }}</p>
+@endauth
+
+@guest
+    <!-- Show to guests (not logged in) -->
+    <p>Please login first</p>
+@endguest
+
+@if(Auth::check())
+    <!-- User is logged in -->
+@endif
+
+@unless(Auth::check())
+    <!-- User is NOT logged in -->
+@endunless
+```
+
+================================================================================
+SECTION 10: COMPLETE WORKFLOW EXAMPLE
+================================================================================
+
+STEP-BY-STEP: NEW USER REGISTRATION TO VIEWING PROFILE
+
+1. USER VISITS /register
+   - AuthController::registerForm() returns registration form view
+   - Form has fields: name, email, password, password_confirmation
+
+2. USER FILLS FORM AND CLICKS REGISTER
+   - POST to /register
+   - RegisterRequest validates:
+     * name required, string, max 255
+     * email required, email, unique in users table
+     * password required, min 8, confirmed (must match confirmation)
+   
+3. AuthController::registerWeb() EXECUTES:
+   - Create user with Hash::make() for password
+   - Create empty profile: $user->profile()->create([])
+   - Send VerifyEmailWithCustomUrl notification
+   - Returns redirect to /verify-email/{id}
+
+4. USER CHECKS EMAIL AND CLICKS VERIFICATION LINK
+   - Link URL: /verify-email/{id}/{hash}
+   - Hash is sha1 of user's email
+   - EmailVerificationController::verifyWeb() executes:
+     * Find user by ID
+     * Verify hash matches
+     * Call $user->markEmailAsVerified()
+     * Sets email_verified_at timestamp
+     * Return verify.blade.php view showing success
+
+5. USER CLICKS "GO TO LOGIN" FROM VERIFICATION PAGE
+   - Goes to /login
+   - AuthController::loginForm() shows login view
+
+6. USER ENTERS EMAIL/PASSWORD AND LOGS IN
+   - POST to /login
+   - LoginRequest validates email, password
+   - AuthController::loginWeb():
+     * Find user by email
+     * Verify password with Hash::check()
+     * Check if $user->hasVerifiedEmail() (email_verified_at is not NULL)
+     * Auth::login($user) creates session
+     * Redirect to /dashboard
+
+7. DASHBOARD SHOWS USER PROFILE
+   - GET /dashboard (requires auth middleware)
+   - ProfileController::dashboard():
+     * Get Auth::user()
+     * Get $user->profile
+     * Return profile/dashboard.blade.php with data
+
+8. USER CLICKS "EDIT PROFILE"
+   - GET /profile/edit
+   - ProfileController::edit() shows form
+
+9. USER UPLOADS AVATAR AND UPDATES BIO
+   - POST /profile/update
+   - ProfileController::updateWeb():
+     * Validate input
+     * If avatar file: delete old, store new with Storage::disk('public')
+     * Update profile: $profile->update($validated)
+     * Redirect to dashboard with success message
+
+10. FLASH MESSAGE APPEARS: "Profile updated successfully!"
+    - Stored in session: redirect(...)->with('success', 'message')
+    - Shown in main.blade.php: {{ Session::get('success') }}
+    - JavaScript auto-hides after 5 seconds
+
+KEY TAKEAWAYS:
+1. Always hash passwords before storing: Hash::make()
+2. Check if email verified before allowing features
+3. Use middleware to protect routes
+4. Separate concerns: Controllers handle logic, views handle display
+5. Use Form Requests for validation
+6. Flash messages for user feedback
+7. Relationships (hasOne) connect models efficiently
+8. Policies control who can do what
+9. Storage::disk('public') for file uploads
+10. Auth::user() to get current logged-in user
+
+================================================================================
+QUICK REFERENCE: COMMON OPERATIONS
+================================================================================
+
+GET CURRENT USER:
+$user = Auth::user();
+$user = \Auth::user();
+
+CHECK IF AUTHENTICATED:
+if (Auth::check()) { }
+if (Auth::guest()) { }
+
+CREATE SESSION:
+Auth::login($user);
+Auth::login($user, $rememberMe);
+
+DESTROY SESSION:
+Auth::logout();
+
+HASH PASSWORD:
+$hashed = Hash::make($password);
+
+VERIFY PASSWORD:
+if (Hash::check($inputPassword, $hashedPassword)) { }
+
+REDIRECT WITH MESSAGE:
+return redirect('/path')->with('success', 'Message');
+
+VALIDATE INPUT:
+$validated = $request->validate([
+    'email' => 'required|email|unique:users',
+    'password' => 'required|min:8|confirmed',
+]);
+
+SEND NOTIFICATION:
+$user->notify(new VerifyEmailWithCustomUrl($url));
+
+UPLOAD FILE:
+$path = $request->file('avatar')->store('avatars', 'public');
+
+DELETE FILE:
+Storage::disk('public')->delete($path);
+
+WORK WITH RELATIONSHIPS:
+$user->profile()->create($data); // Create related
+$profile = Auth::user()->profile; // Get related
+$user = $profile->user; // Access parent
+
+================================================================================
+END OF GUIDE
+================================================================================
+This guide covers the complete authentication and profile management system.
+Use this as reference for implementing similar features in other projects.
+
+For questions about specific implementations, refer back to the relevant sections.
+================================================================================

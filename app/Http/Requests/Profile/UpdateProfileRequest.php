@@ -11,9 +11,8 @@ class UpdateProfileRequest extends FormRequest
      */
     public function authorize(): bool
     {
-        return true;
+        return $this->user()->can('update', $this->user()->profile);
     }
-
     /**
      * Get the validation rules that apply to the request.
      *
@@ -25,7 +24,7 @@ class UpdateProfileRequest extends FormRequest
             'bio'=>'nullable|string|max:1000',
             'phone'=>'nullable|string|max:20',
             'avatar'=>'nullable|image|mimes:jpg,jpeg,png|max:2048',
-            'gender'=>'nullable|in:Male,Female,Other',
+            'gender'=>'nullable|in:male,female,other',
             'dob'=>'nullable|date|before:today',
             'country'=>'nullable|string|max:100',
             'city'=>'nullable|string|max:100',
